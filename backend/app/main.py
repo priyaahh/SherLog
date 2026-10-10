@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import connect_to_mongo, close_mongo_connection
 from app.api.health import router as health_router
+from app.api.incidents import router as incidents_router
+from app.api.logs import router as logs_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,3 +51,5 @@ app.add_middleware(
 # Register API Routers
 app.include_router(health_router, prefix=settings.API_V1_STR, tags=["Health"])
 app.include_router(health_router, tags=["Health"])  # Root /health shortcut
+app.include_router(incidents_router, prefix=settings.API_V1_STR, tags=["Incidents"])
+app.include_router(logs_router, prefix=settings.API_V1_STR, tags=["Logs"])
