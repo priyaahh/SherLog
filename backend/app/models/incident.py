@@ -18,6 +18,7 @@ class SeverityEnum(str, Enum):
 class StatusEnum(str, Enum):
     OPEN = "open"
     INVESTIGATING = "investigating"
+    INVESTIGATED = "investigated"
     RESOLVED = "resolved"
 
 

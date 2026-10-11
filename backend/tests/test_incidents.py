@@ -15,11 +15,10 @@ mock_client = AsyncMongoMockClient()
 mock_db = mock_client["sherlog_test_db_incidents"]
 
 
-def override_get_db():
-    return mock_db
-
-
-app.dependency_overrides[get_db] = override_get_db
+@pytest.fixture(autouse=True)
+def setup_test_db():
+    app.dependency_overrides[get_db] = lambda: mock_db
+    yield
 
 
 def test_create_incident():

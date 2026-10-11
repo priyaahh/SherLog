@@ -17,20 +17,15 @@ mock_client = AsyncMongoMockClient()
 mock_db = mock_client["sherlog_test_db_logs"]
 
 
-def override_get_db():
-    return mock_db
-
-
-app.dependency_overrides[get_db] = override_get_db
-
-
 @pytest.fixture(autouse=True)
-def clear_test_db():
-    """Clear test database collections before each test"""
+def setup_test_db():
+    """Ensure app uses this module's mock_db and clean collections before each test"""
+    app.dependency_overrides[get_db] = lambda: mock_db
     async def _clear():
         await mock_db.incidents.delete_many({})
         await mock_db.logs.delete_many({})
     asyncio.run(_clear())
+    yield
 
 
 def create_sample_incident() -> str:

@@ -163,11 +163,14 @@ def internal_error(error):
 if __name__ == '__main__':
     try:
         init_ai_components()
-        logger.info(f"Starting AIRS AI Service on port {settings.flask_port}")
+        flask_host = os.environ.get("FLASK_HOST", getattr(settings, "flask_host", "127.0.0.1"))
+        flask_debug = os.environ.get("FLASK_DEBUG", "false").lower() in ("true", "1", "t", "yes")
+        flask_port = int(os.environ.get("PORT", os.environ.get("FLASK_PORT", str(settings.flask_port))))
+        logger.info(f"Starting AIRS AI Service on {flask_host}:{flask_port} (debug={flask_debug})")
         app.run(
-            host='0.0.0.0',
-            port=settings.flask_port,
-            debug=settings.flask_debug
+            host=flask_host,
+            port=flask_port,
+            debug=flask_debug
         )
     except Exception as e:
         logger.error(f"Failed to start application: {e}")

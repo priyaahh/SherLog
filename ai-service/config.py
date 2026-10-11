@@ -12,7 +12,8 @@ class Settings(BaseSettings):
     
     # API Configuration
     flask_env: str = "development"
-    flask_debug: bool = True
+    flask_host: str = "127.0.0.1"
+    flask_debug: bool = False
     flask_port: int = 5000
     
     # LLM Configuration
