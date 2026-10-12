@@ -1,0 +1,39 @@
+services:
+  # -------------------------------------------------------------
+  # 1. SherLog AI Service (Flask + LangGraph Multi-Agent Engine)
+  # -------------------------------------------------------------
+  - type: web
+    name: sherlog-ai-service
+    runtime: docker
+    plan: free
+    region: oregon
+    rootDir: ai-service
+    dockerfilePath: Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false
+
+  # -------------------------------------------------------------
+  # 2. SherLog Backend (FastAPI + Async Motor + MongoDB)
+  # -------------------------------------------------------------
+  - type: web
+    name: sherlog-backend
+    runtime: python
+    plan: free
+    region: oregon
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: MONGODB_URL
+        sync: false
+      - key: DATABASE_NAME
+        value: sherlog
+      - key: CORS_ORIGINS
+        sync: false
+      - key: AI_SERVICE_URL
+        sync: false
