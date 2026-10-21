@@ -9,7 +9,7 @@ from bson import ObjectId
 from fastapi import BackgroundTasks, HTTPException, status
 
 from app.services.incident_service import parse_object_id, IncidentService
-from app.services.ai_client import ai_service_client, AIServiceClient
+from app.services.ai_client import ai_service_client, AIServiceClient, sanitize_error_message
 from app.models.investigation import (
     InvestigationTriggerResponse,
     InvestigationResponse,
@@ -95,7 +95,7 @@ async def execute_investigation_task(
         # 3. Save completed investigation state
         anomalies = result.get("anomalies", [])
         runbooks = result.get("relevant_runbooks", [])
-        errors = result.get("errors", [])
+        errors = [sanitize_error_message(err, max_length=200) for err in result.get("errors", [])]
 
         await db.investigations.update_one(
             {"_id": inv_oid},
@@ -129,7 +129,7 @@ async def execute_investigation_task(
 
     except Exception as e:
         now = datetime.now(timezone.utc)
-        error_msg = str(e)
+        error_msg = sanitize_error_message(str(e), max_length=200)
         logger.error(f"Background investigation '{investigation_id}' failed: {error_msg}")
 
         # Mark investigation as failed with clear error message instead of crashing

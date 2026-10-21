@@ -20,6 +20,7 @@ Covers:
 
 import io
 import asyncio
+import logging
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch, MagicMock
 import pytest
@@ -492,3 +493,168 @@ def test_get_investigation_and_report_endpoints():
     assert res_inv_after.json()["incident_id"] == inc_id
     assert res_inv_after.json()["status"] == "in_progress"
     assert res_inv_after.json()["logs_truncated"] is False
+
+
+# =========================================================================
+# Requirement: Non-2xx and non-JSON response error sanitization & logging
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_ai_service_non_2xx_html_response_truncation_and_logging(caplog):
+    """
+    When AI service returns a non-2xx response with HTML:
+    - Truncate the error stored on the investigation to ~200 characters
+    - Strip HTML tags
+    - Log the full body server-side only
+    """
+    now = datetime.now(timezone.utc)
+    inc_res = await mock_db.incidents.insert_one({
+        "title": "Gateway Crash Incident",
+        "description": "502 Gateway Error",
+        "service_name": "api-gateway",
+        "severity": "critical",
+        "status": "investigating",
+        "created_at": now,
+        "updated_at": now
+    })
+    inc_id = str(inc_res.inserted_id)
+
+    inv_doc = {
+        "incident_id": inc_id,
+        "ai_investigation_id": None,
+        "status": "in_progress",
+        "logs_truncated": False,
+        "logs_analyzed_count": 10,
+        "truncation_note": None,
+        "anomalies": [],
+        "relevant_runbooks": [],
+        "errors": [],
+        "started_at": now,
+        "completed_at": None
+    }
+    inv_res = await mock_db.investigations.insert_one(inv_doc)
+    inv_id = str(inv_res.inserted_id)
+
+    # 1,200 character HTML error body from proxy / crash
+    long_html_body = (
+        "<!DOCTYPE html><html><head><title>502 Bad Gateway Crash</title></head><body>"
+        "<h1>502 Bad Gateway</h1><p>"
+        + "Detailed stack trace and internal error message from proxy that goes on and on: " * 15
+        + "</p></body></html>"
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 502
+    mock_resp.text = long_html_body
+    mock_resp.is_error = True
+
+    client_instance = AIServiceClient("http://fake-ai-service:5000")
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with caplog.at_level(logging.ERROR):
+            await execute_investigation_task(
+                incident_id=inc_id,
+                investigation_id=inv_id,
+                logs=["ERROR 502 upstream failed"],
+                context="api-gateway",
+                db=mock_db,
+                client=client_instance
+            )
+
+    # 1. Investigation marked as failed
+    inv_record = await mock_db.investigations.find_one({"_id": inv_res.inserted_id})
+    assert inv_record["status"] == "failed"
+    assert len(inv_record["errors"]) == 1
+
+    error_stored = inv_record["errors"][0]
+
+    # 2. Error stored on investigation is truncated to ~200 characters
+    assert len(error_stored) <= 200
+
+    # 3. HTML tags stripped from the stored error
+    assert "<html" not in error_stored.lower()
+    assert "<body>" not in error_stored.lower()
+    assert "<h1>" not in error_stored.lower()
+    assert "<" not in error_stored
+    assert ">" not in error_stored
+    assert "502" in error_stored
+
+    # 4. Full body is logged server-side only
+    assert long_html_body in caplog.text
+
+    # 5. Incident reset to 'open'
+    inc_record = await mock_db.incidents.find_one({"_id": inc_res.inserted_id})
+    assert inc_record["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_ai_service_non_json_response_truncation_and_logging(caplog):
+    """
+    When AI service returns a non-JSON response (e.g. HTML on 202 or plain text):
+    - Truncate the error stored on the investigation to ~200 characters
+    - Strip HTML tags
+    - Log the full body server-side only
+    """
+    now = datetime.now(timezone.utc)
+    inc_res = await mock_db.incidents.insert_one({
+        "title": "Non-JSON Response Incident",
+        "description": "Malformed response",
+        "service_name": "worker",
+        "severity": "medium",
+        "status": "investigating",
+        "created_at": now,
+        "updated_at": now
+    })
+    inc_id = str(inc_res.inserted_id)
+
+    inv_doc = {
+        "incident_id": inc_id,
+        "ai_investigation_id": None,
+        "status": "in_progress",
+        "logs_truncated": False,
+        "logs_analyzed_count": 5,
+        "truncation_note": None,
+        "anomalies": [],
+        "relevant_runbooks": [],
+        "errors": [],
+        "started_at": now,
+        "completed_at": None
+    }
+    inv_res = await mock_db.investigations.insert_one(inv_doc)
+    inv_id = str(inv_res.inserted_id)
+
+    non_json_html = (
+        "<html><body><h1>Unexpected Cloudflare Challenge</h1><p>"
+        + "Verification required before proceeding to the requested service. " * 12
+        + "</p></body></html>"
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 202
+    mock_resp.text = non_json_html
+    mock_resp.json.side_effect = ValueError("Invalid JSON")
+
+    client_instance = AIServiceClient("http://fake-ai-service:5000")
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with caplog.at_level(logging.ERROR):
+            await execute_investigation_task(
+                incident_id=inc_id,
+                investigation_id=inv_id,
+                logs=["ERROR worker disconnected"],
+                context="worker",
+                db=mock_db,
+                client=client_instance
+            )
+
+    inv_record = await mock_db.investigations.find_one({"_id": inv_res.inserted_id})
+    assert inv_record["status"] == "failed"
+
+    error_stored = inv_record["errors"][0]
+    assert len(error_stored) <= 200
+    assert "<" not in error_stored
+    assert ">" not in error_stored
+    assert "non-json" in error_stored.lower()
+    assert non_json_html in caplog.text
