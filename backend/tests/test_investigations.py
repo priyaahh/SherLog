@@ -658,3 +658,170 @@ async def test_ai_service_non_json_response_truncation_and_logging(caplog):
     assert ">" not in error_stored
     assert "non-json" in error_stored.lower()
     assert non_json_html in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_execute_investigation_empty_exception_stores_unknown_failure():
+    """When an exception has an empty message, store 'Unknown failure'"""
+    now = datetime.now(timezone.utc)
+    inc_res = await mock_db.incidents.insert_one({
+        "title": "Blank Error Test",
+        "description": "Blank error",
+        "service_name": "worker",
+        "severity": "low",
+        "status": "investigating",
+        "created_at": now,
+        "updated_at": now
+    })
+    inc_id = str(inc_res.inserted_id)
+
+    inv_res = await mock_db.investigations.insert_one({
+        "incident_id": inc_id,
+        "status": "in_progress",
+        "started_at": now,
+        "errors": []
+    })
+    inv_id = str(inv_res.inserted_id)
+
+    mock_client_instance = AsyncMock()
+    mock_client_instance.trigger_investigation.side_effect = Exception("")
+
+    await execute_investigation_task(
+        incident_id=inc_id,
+        investigation_id=inv_id,
+        logs=["ERROR something went wrong"],
+        context="worker",
+        db=mock_db,
+        client=mock_client_instance
+    )
+
+    inv_record = await mock_db.investigations.find_one({"_id": inv_res.inserted_id})
+    assert inv_record["status"] == "failed"
+    assert len(inv_record["errors"]) == 1
+    assert inv_record["errors"][0] == "Unknown failure"
+
+
+@pytest.mark.asyncio
+async def test_execute_investigation_exception_stores_type_and_message():
+    """When an exception has a message, store f'{type(e).__name__}: {str(e)}'"""
+    now = datetime.now(timezone.utc)
+    inc_res = await mock_db.incidents.insert_one({
+        "title": "Typed Error Test",
+        "description": "Typed error",
+        "service_name": "worker",
+        "severity": "medium",
+        "status": "investigating",
+        "created_at": now,
+        "updated_at": now
+    })
+    inc_id = str(inc_res.inserted_id)
+
+    inv_res = await mock_db.investigations.insert_one({
+        "incident_id": inc_id,
+        "status": "in_progress",
+        "started_at": now,
+        "errors": []
+    })
+    inv_id = str(inv_res.inserted_id)
+
+    mock_client_instance = AsyncMock()
+    mock_client_instance.trigger_investigation.side_effect = ValueError("Invalid payload signature")
+
+    await execute_investigation_task(
+        incident_id=inc_id,
+        investigation_id=inv_id,
+        logs=["ERROR signature mismatch"],
+        context="worker",
+        db=mock_db,
+        client=mock_client_instance
+    )
+
+    inv_record = await mock_db.investigations.find_one({"_id": inv_res.inserted_id})
+    assert inv_record["status"] == "failed"
+    assert len(inv_record["errors"]) == 1
+    assert inv_record["errors"][0] == "ValueError: Invalid payload signature"
+
+
+@pytest.mark.asyncio
+async def test_execute_investigation_incident_status_update_failure_does_not_prevent_report(caplog):
+    """
+    When incident status update to 'investigated' fails, the report is still saved,
+    the investigation completes, and an ERROR is logged with the incident_id.
+    """
+    now = datetime.now(timezone.utc)
+    inc_res = await mock_db.incidents.insert_one({
+        "title": "Incident Update Failure Test",
+        "description": "Report should survive incident update failure",
+        "service_name": "order-service",
+        "severity": "critical",
+        "status": "investigating",
+        "created_at": now,
+        "updated_at": now
+    })
+    inc_id = str(inc_res.inserted_id)
+
+    inv_res = await mock_db.investigations.insert_one({
+        "incident_id": inc_id,
+        "status": "in_progress",
+        "started_at": now,
+        "errors": []
+    })
+    inv_id = str(inv_res.inserted_id)
+
+    mock_ai_client = AsyncMock()
+    mock_ai_client.trigger_investigation.return_value = "ai-inv-resilient"
+    mock_ai_client.poll_investigation_result.return_value = {
+        "investigation_id": "ai-inv-resilient",
+        "status": "completed",
+        "root_cause": "Deadlock in order placement",
+        "risk_assessment": {"severity": "critical"},
+        "recommendations": ["Optimize lock order"],
+        "anomalies": [],
+        "relevant_runbooks": [],
+        "errors": []
+    }
+
+    # Simulate database failure only on incidents.update_one
+    mock_incidents_col = MagicMock()
+    mock_incidents_col.update_one = AsyncMock(
+        side_effect=RuntimeError("Simulated DB connection drop on incidents collection")
+    )
+
+    class DBProxy:
+        def __init__(self, real_db, incidents_col):
+            self._real_db = real_db
+            self.incidents = incidents_col
+
+        def __getattr__(self, name):
+            return getattr(self._real_db, name)
+
+        def __getitem__(self, name):
+            if name == "incidents":
+                return self.incidents
+            return self._real_db[name]
+
+    proxy_db = DBProxy(mock_db, mock_incidents_col)
+
+    with caplog.at_level(logging.ERROR):
+        await execute_investigation_task(
+            incident_id=inc_id,
+            investigation_id=inv_id,
+            logs=["ERROR Deadlock detected"],
+            context="order-service",
+            db=proxy_db,
+            client=mock_ai_client
+        )
+
+    # 1. Report MUST still be saved
+    report = await mock_db.reports.find_one({"incident_id": inc_id})
+    assert report is not None
+    assert report["root_cause"] == "Deadlock in order placement"
+
+    # 2. Investigation status is COMPLETED
+    inv_record = await mock_db.investigations.find_one({"_id": inv_res.inserted_id})
+    assert inv_record["status"] == "completed"
+
+    # 3. Logged as ERROR with incident_id
+    assert inc_id in caplog.text
+    assert "Failed to update incident" in caplog.text
+

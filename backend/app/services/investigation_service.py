@@ -120,16 +120,20 @@ async def execute_investigation_task(
         await db.reports.insert_one(report_doc)
 
         # 5. Mark incident as 'investigated' (never auto-resolve: human engineers review RCA before resolving)
-        await db.incidents.update_one(
-            {"_id": parse_object_id(incident_id)},
-            {"$set": {"status": "investigated", "updated_at": now}}
-        )
-
-        logger.info(f"AI investigation '{investigation_id}' completed and report saved. Incident status set to 'investigated'.")
+        try:
+            await db.incidents.update_one(
+                {"_id": parse_object_id(incident_id)},
+                {"$set": {"status": "investigated", "updated_at": now}}
+            )
+            logger.info(f"AI investigation '{investigation_id}' completed and report saved. Incident status set to 'investigated'.")
+        except Exception as inc_err:
+            logger.error(f"Failed to update incident '{incident_id}' status to 'investigated': {inc_err}")
 
     except Exception as e:
         now = datetime.now(timezone.utc)
-        error_msg = sanitize_error_message(str(e), max_length=200)
+        err_text = str(e).strip() if str(e) else ""
+        raw_error = f"{type(e).__name__}: {str(e)}" if err_text else "Unknown failure"
+        error_msg = sanitize_error_message(raw_error, max_length=200) or "Unknown failure"
         logger.error(f"Background investigation '{investigation_id}' failed: {error_msg}")
 
         # Mark investigation as failed with clear error message instead of crashing
@@ -143,10 +147,13 @@ async def execute_investigation_task(
         )
 
         # On failure, reset incident back to 'open'
-        await db.incidents.update_one(
-            {"_id": parse_object_id(incident_id)},
-            {"$set": {"status": "open", "updated_at": now}}
-        )
+        try:
+            await db.incidents.update_one(
+                {"_id": parse_object_id(incident_id)},
+                {"$set": {"status": "open", "updated_at": now}}
+            )
+        except Exception as inc_err:
+            logger.error(f"Failed to reset incident '{incident_id}' status to 'open': {inc_err}")
 
 
 
