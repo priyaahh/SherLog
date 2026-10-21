@@ -5,6 +5,7 @@ Coordinates execution flow between specialized agents
 
 import logging
 import re
+import time
 import uuid
 from typing import Dict, Any, List, Optional, TypedDict
 from langgraph.graph import StateGraph, END
@@ -53,6 +54,7 @@ class AIOrchestrator:
                 self.rag_retriever = None
 
         # Initialize LLM conditionally
+        self.fallback_llm = None
         if getattr(settings, 'google_api_key', None):
             try:
                 self.llm = ChatGoogleGenerativeAI(
@@ -63,6 +65,18 @@ class AIOrchestrator:
             except Exception as e:
                 logger.warning(f"LLM initialization warning: {e}")
                 self.llm = None
+
+            fallback_model = getattr(settings, 'llm_fallback_model', '') or ''
+            if fallback_model.strip():
+                try:
+                    self.fallback_llm = ChatGoogleGenerativeAI(
+                        model=fallback_model.strip(),
+                        temperature=settings.llm_temperature,
+                        google_api_key=settings.google_api_key
+                    )
+                except Exception as e:
+                    logger.warning(f"Fallback LLM initialization warning: {e}")
+                    self.fallback_llm = None
         else:
             self.llm = None
             logger.warning("GOOGLE_API_KEY not configured. Running orchestrator in rule/fallback mode.")
@@ -215,6 +229,16 @@ class AIOrchestrator:
             return f"Error detected in service logs: {logs[0][:120]}"
         return "System failure identified from log errors."
 
+    @staticmethod
+    def _extract_llm_text(response) -> str:
+        """Extract clean text content from ChatGoogleGenerativeAI response"""
+        content = response.content if hasattr(response, "content") else str(response)
+        if isinstance(content, list):
+            rc = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
+        else:
+            rc = str(content)
+        return rc.strip()
+
     def _root_cause_agent(self, state: InvestigationState) -> InvestigationState:
         """Phase 4: Analyze root cause using Gemini LLM and context"""
         inv_id = state.get("investigation_id", "unknown")
@@ -249,19 +273,61 @@ class AIOrchestrator:
             )
 
             if self.llm:
-                try:
-                    response = self.llm.invoke(prompt)
-                    content = response.content if hasattr(response, "content") else str(response)
-                    if isinstance(content, list):
-                        rc = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
-                    else:
-                        rc = str(content)
-                    state["root_cause"] = rc.strip()
-                except Exception as llm_err:
-                    logger.error(f"LLM root cause invocation failed: {llm_err}")
+                backoff_delays = [2, 4, 8, 16, 32]
+                llm_success = False
+                last_err = None
+
+                for attempt in range(len(backoff_delays) + 1):
+                    try:
+                        response = self.llm.invoke(prompt)
+                        state["root_cause"] = self._extract_llm_text(response)
+                        llm_success = True
+                        break
+                    except Exception as llm_err:
+                        last_err = llm_err
+                        err_text = str(llm_err).upper()
+                        is_transient = any(code in err_text for code in ["503", "UNAVAILABLE", "429"])
+                        if not is_transient:
+                            logger.error(f"[{inv_id}] Non-retryable LLM error: {llm_err}")
+                            break
+
+                        if attempt < len(backoff_delays):
+                            delay = backoff_delays[attempt]
+                            logger.warning(
+                                f"[{inv_id}] LLM invoke failed with transient error ({llm_err}). "
+                                f"Retrying in {delay}s (attempt {attempt + 1}/{len(backoff_delays)})..."
+                            )
+                            time.sleep(delay)
+                        else:
+                            logger.error(f"[{inv_id}] All 5 LLM retries exhausted: {llm_err}")
+
+                # If all retries fail and settings has a non-empty llm_fallback_model, try once with that model
+                if not llm_success:
+                    fallback_model = getattr(self.settings, 'llm_fallback_model', '') or ''
+                    if fallback_model.strip():
+                        try:
+                            logger.info(f"[{inv_id}] Trying fallback LLM model '{fallback_model}'...")
+                            fallback_llm = getattr(self, 'fallback_llm', None)
+                            if fallback_llm is None and getattr(self.settings, 'google_api_key', None):
+                                fallback_llm = ChatGoogleGenerativeAI(
+                                    model=fallback_model.strip(),
+                                    temperature=getattr(self.settings, 'llm_temperature', 0.3),
+                                    google_api_key=self.settings.google_api_key
+                                )
+                                self.fallback_llm = fallback_llm
+                            if fallback_llm:
+                                response = fallback_llm.invoke(prompt)
+                                state["root_cause"] = self._extract_llm_text(response)
+                                llm_success = True
+                                logger.info(f"[{inv_id}] Fallback LLM model '{fallback_model}' succeeded")
+                        except Exception as fb_err:
+                            logger.error(f"[{inv_id}] Fallback LLM invocation failed: {fb_err}")
+                            last_err = fb_err
+
+                if not llm_success:
                     if "errors" not in state or not isinstance(state["errors"], list):
                         state["errors"] = []
-                    state["errors"].append(f"LLM invocation error: {llm_err}")
+                    state["errors"].append(f"LLM invocation error: {last_err}")
                     state["root_cause"] = self._deterministic_root_cause(anomalies, logs)
             else:
                 state["root_cause"] = self._deterministic_root_cause(anomalies, logs)

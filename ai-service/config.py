@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     # LLM Configuration
     google_api_key: Optional[str] = None
     llm_model: str = "gemini-1.5-flash"
+    llm_fallback_model: str = ""
     llm_temperature: float = 0.3
     
     # Vector Store (ChromaDB)

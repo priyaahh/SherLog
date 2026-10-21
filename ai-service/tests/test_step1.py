@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from config import settings
 from rag.retriever import RAGRetriever
+from agents.orchestrator import AIOrchestrator
 from app import app, get_rag_retriever
 
 
@@ -195,6 +196,116 @@ class TestStep1AIService(unittest.TestCase):
         db_results = [r["id"] for r in res_db.get_json().get("results", [])]
         print(f"RAG search results for DB pool query: {db_results}")
         self.assertIn("rb_db_pool_exhausted", db_results)
+
+    def test_06_llm_retries_on_503_and_recovers(self):
+        """Test LLM retries on 503 / UNAVAILABLE / 429 with backoff and succeeds on recovery"""
+        print("\n--- Running Test 6: LLM Retries on 503 / UNAVAILABLE ---")
+        orchestrator = AIOrchestrator(settings)
+        
+        mock_llm = MagicMock()
+        success_response = MagicMock()
+        success_response.content = "Root cause: transient upstream 503 recovered after retry."
+        # Fail twice with 503 UNAVAILABLE, succeed on 3rd call
+        mock_llm.invoke.side_effect = [
+            Exception("503 Server Unavailable"),
+            Exception("UNAVAILABLE: Service temporarily overloaded"),
+            success_response
+        ]
+        orchestrator.llm = mock_llm
+        
+        state = {
+            "investigation_id": "test-retry-1",
+            "logs": ["2026-10-10 ERROR 503 service unavailable"],
+            "anomalies": [{"type": "request_timeout", "severity": "high", "count": 1}],
+            "relevant_runbooks": [],
+            "errors": []
+        }
+        
+        with patch('time.sleep') as mock_sleep:
+            result_state = orchestrator._root_cause_agent(state)
+            
+            # Should have invoked 3 times (initial + 2 retries)
+            self.assertEqual(mock_llm.invoke.call_count, 3)
+            # Should have slept with backoff delays 2s, 4s
+            self.assertEqual(mock_sleep.call_count, 2)
+            mock_sleep.assert_has_calls([unittest.mock.call(2), unittest.mock.call(4)])
+            self.assertEqual(result_state["root_cause"], "Root cause: transient upstream 503 recovered after retry.")
+
+    def test_07_llm_retries_fail_and_uses_fallback_model(self):
+        """Test that exhausting all 5 retries triggers the fallback model once"""
+        print("\n--- Running Test 7: All 5 Retries Fail -> Fallback Model Invocation ---")
+        orchestrator = AIOrchestrator(settings)
+        orchestrator.settings.llm_fallback_model = "gemini-1.5-pro-fallback"
+        
+        mock_primary_llm = MagicMock()
+        # Fail on initial attempt + 5 retries (6 attempts total) with 429 Resource Exhausted
+        mock_primary_llm.invoke.side_effect = [
+            Exception("429 Resource Exhausted: quota exceeded") for _ in range(6)
+        ]
+        orchestrator.llm = mock_primary_llm
+        
+        mock_fallback_llm = MagicMock()
+        fallback_resp = MagicMock()
+        fallback_resp.content = "Root cause: diagnosed by fallback model after primary 429 quota exhaustion."
+        mock_fallback_llm.invoke.return_value = fallback_resp
+        orchestrator.fallback_llm = mock_fallback_llm
+        
+        state = {
+            "investigation_id": "test-fallback-1",
+            "logs": ["2026-10-10 ERROR 429 quota exceeded"],
+            "anomalies": [{"type": "request_timeout", "severity": "high", "count": 1}],
+            "relevant_runbooks": [],
+            "errors": []
+        }
+        
+        with patch('time.sleep') as mock_sleep:
+            result_state = orchestrator._root_cause_agent(state)
+            
+            # Primary LLM invoked 6 times (1 initial + 5 retries)
+            self.assertEqual(mock_primary_llm.invoke.call_count, 6)
+            # Backoff delays: 2s, 4s, 8s, 16s, 32s
+            self.assertEqual(mock_sleep.call_count, 5)
+            mock_sleep.assert_has_calls([
+                unittest.mock.call(2),
+                unittest.mock.call(4),
+                unittest.mock.call(8),
+                unittest.mock.call(16),
+                unittest.mock.call(32)
+            ])
+            # Fallback LLM invoked once
+            mock_fallback_llm.invoke.assert_called_once()
+            self.assertEqual(
+                result_state["root_cause"],
+                "Root cause: diagnosed by fallback model after primary 429 quota exhaustion."
+            )
+
+    def test_08_llm_non_retryable_error_does_not_retry(self):
+        """Test non-retryable error (e.g. 400 Bad Request) fails immediately without backoff"""
+        print("\n--- Running Test 8: Non-retryable error does not backoff ---")
+        orchestrator = AIOrchestrator(settings)
+        orchestrator.settings.llm_fallback_model = ""
+        
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = Exception("400 Bad Request: Invalid model argument")
+        orchestrator.llm = mock_llm
+        
+        state = {
+            "investigation_id": "test-non-retryable",
+            "logs": ["2026-10-10 ERROR bad request"],
+            "anomalies": [{"type": "db_pool_exhausted", "severity": "critical", "count": 1}],
+            "relevant_runbooks": [],
+            "errors": []
+        }
+        
+        with patch('time.sleep') as mock_sleep:
+            result_state = orchestrator._root_cause_agent(state)
+            
+            # Should have called primary LLM only once
+            self.assertEqual(mock_llm.invoke.call_count, 1)
+            # Should not sleep at all
+            self.assertEqual(mock_sleep.call_count, 0)
+            # Should fall back to deterministic root cause
+            self.assertIn("connection pool", result_state["root_cause"].lower())
 
 
 if __name__ == '__main__':
