@@ -80,6 +80,7 @@ class RAGRetriever:
                 for score, doc in scored_docs[:top_k]:
                     lexical_results.append({
                         "id": doc["id"],
+                        "title": doc.get("title") or doc.get("metadata", {}).get("title", ""),
                         "content": doc["content"],
                         "score": float(score),
                         "source": "lexical_bm25",
@@ -106,6 +107,7 @@ class RAGRetriever:
                         distance = float(vector_query_res['distances'][0][i])
                         vector_results_list.append({
                             "id": doc_id,
+                            "title": metadata.get("title", ""),
                             "content": vector_query_res['documents'][0][i],
                             "score": distance,
                             "source": "vector",
@@ -142,26 +144,48 @@ class RAGRetriever:
                 doc_id = doc.get('id')
                 content = doc.get('content', '')
                 source = doc.get('source', 'unknown')
-                metadata = doc.get('metadata', {})
+                metadata = dict(doc.get('metadata', {}))
+                title = doc.get('title', '')
+                if title and 'title' not in metadata:
+                    metadata['title'] = title
+                if source and 'source' not in metadata:
+                    metadata['source'] = source
                 
                 # Ingest into ChromaDB (vector store)
                 if self.vector_collection:
-                    self.vector_collection.add(
-                        ids=[doc_id],
-                        documents=[content],
-                        metadatas=[metadata]
-                    )
+                    if hasattr(self.vector_collection, 'upsert'):
+                        self.vector_collection.upsert(
+                            ids=[doc_id],
+                            documents=[content],
+                            metadatas=[metadata]
+                        )
+                    else:
+                        self.vector_collection.add(
+                            ids=[doc_id],
+                            documents=[content],
+                            metadatas=[metadata]
+                        )
                 
                 # Ingest into in-process BM25 document store using regex tokenizer
                 tokens = tokenize_text(content)
+                if title:
+                    tokens.extend(tokenize_text(title))
+
                 doc_obj = {
                     "id": doc_id,
+                    "title": title,
                     "content": content,
                     "source": source,
                     "metadata": metadata,
                     "tokens": tokens
                 }
-                self.documents.append(doc_obj)
+
+                existing_idx = next((i for i, d in enumerate(self.documents) if d['id'] == doc_id), None)
+                if existing_idx is not None:
+                    self.documents[existing_idx] = doc_obj
+                else:
+                    self.documents.append(doc_obj)
+
                 ingested += 1
                 logger.debug(f"Ingested document: {doc_id}")
             except Exception as e:

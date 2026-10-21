@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from config import settings
 from rag.retriever import RAGRetriever
-from app import app
+from app import app, get_rag_retriever
 
 
 class TestStep1AIService(unittest.TestCase):
@@ -146,6 +146,55 @@ class TestStep1AIService(unittest.TestCase):
                 mock_orch.start_investigation.assert_called_once()
         finally:
             settings.google_api_key = original_key
+
+    def test_05_startup_seed_runbooks_ingested(self):
+        """
+        Test that seed runbooks from seed/runbooks.json are automatically ingested
+        on app startup and available for retrieval.
+        """
+        print("\n--- Running Test 5: Verify Startup Seed Runbooks Ingestion ---")
+        retriever = get_rag_retriever()
+        
+        # Verify retriever has documents loaded
+        doc_ids = [d["id"] for d in retriever.documents]
+        print(f"Loaded Document IDs: {doc_ids}")
+        
+        # Verify all 5 required error categories are covered
+        required_categories = [
+            ("db_pool_exhausted", "rb_db_pool_exhausted"),
+            ("OOM", "rb_oom_heap_exhaustion"),
+            ("request_timeout", "rb_request_timeout"),
+            ("connection_failure", "rb_connection_failure"),
+            ("ssl_cert", "rb_ssl_cert_expired")
+        ]
+        
+        for cat_name, expected_id in required_categories:
+            self.assertIn(
+                expected_id,
+                doc_ids,
+                f"Expected runbook {expected_id} for {cat_name} to be ingested on startup"
+            )
+            
+        # Verify search via /api/rag/search endpoint works for seeded runbooks
+        res = self.client.post('/api/rag/search', json={
+            "query": "SSL certificate expired verification failed",
+            "top_k": 3
+        })
+        self.assertEqual(res.status_code, 200)
+        search_data = res.get_json()
+        result_ids = [r["id"] for r in search_data.get("results", [])]
+        print(f"RAG search results for SSL query: {result_ids}")
+        self.assertIn("rb_ssl_cert_expired", result_ids)
+        
+        # Verify search for database connection pool exhaustion
+        res_db = self.client.post('/api/rag/search', json={
+            "query": "ERR_DB_POOL_EXHAUSTED cannot acquire connection pool timeout",
+            "top_k": 3
+        })
+        self.assertEqual(res_db.status_code, 200)
+        db_results = [r["id"] for r in res_db.get_json().get("results", [])]
+        print(f"RAG search results for DB pool query: {db_results}")
+        self.assertIn("rb_db_pool_exhausted", db_results)
 
 
 if __name__ == '__main__':

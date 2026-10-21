@@ -3,14 +3,14 @@ Main Flask application for AIRS AI Service
 Entry point for the multi-agent orchestration system
 """
 
+import json
 import logging
+import os
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from config import settings
 from agents.orchestrator import AIOrchestrator
 from rag.retriever import RAGRetriever
-
-import os
 
 # Ensure logs directory exists
 os.makedirs(os.path.dirname(settings.log_file), exist_ok=True)
@@ -36,29 +36,59 @@ orchestrator = None
 rag_retriever = None
 
 
+def seed_runbooks(retriever):
+    """Seed initial runbooks from seed/runbooks.json into RAG knowledge base"""
+    seed_path = os.path.join(os.path.dirname(__file__), "seed", "runbooks.json")
+    if not os.path.exists(seed_path):
+        logger.warning(f"Seed runbooks file not found at {seed_path}")
+        return 0, 0
+    try:
+        with open(seed_path, "r", encoding="utf-8") as f:
+            runbooks = json.load(f)
+        if isinstance(runbooks, list) and runbooks:
+            ingested, failed = retriever.ingest_documents(runbooks)
+            logger.info(f"Seeded {ingested} runbooks on startup ({failed} failed)")
+            return ingested, failed
+        else:
+            logger.warning(f"Seed runbooks file at {seed_path} is empty or not a list")
+            return 0, 0
+    except Exception as e:
+        logger.error(f"Error seeding runbooks on startup: {e}")
+        return 0, 0
+
+
+def get_rag_retriever():
+    """Get or lazily initialize the RAG retriever and ingest seed runbooks"""
+    global rag_retriever
+    if rag_retriever is None:
+        rag_retriever = RAGRetriever(settings)
+        logger.info("RAG retriever initialized")
+        seed_runbooks(rag_retriever)
+    return rag_retriever
+
+
 def get_orchestrator():
     """Get or lazily initialize the AI orchestrator"""
     global orchestrator
     if orchestrator is None:
-        orchestrator = AIOrchestrator(settings)
+        retriever = get_rag_retriever()
+        orchestrator = AIOrchestrator(settings, rag_retriever=retriever)
         logger.info("AI orchestrator lazily initialized")
     return orchestrator
 
 
-def get_rag_retriever():
-    """Get or lazily initialize the RAG retriever"""
-    global rag_retriever
-    if rag_retriever is None:
-        rag_retriever = RAGRetriever(settings)
-        logger.info("RAG retriever lazily initialized")
-    return rag_retriever
-
-
 def init_ai_components():
-    """Eagerly initialize AI components (used when running as main script)"""
-    get_orchestrator()
+    """Eagerly initialize AI components and seed runbooks on startup"""
     get_rag_retriever()
+    get_orchestrator()
     logger.info("AI components eagerly initialized")
+
+
+# Initialize AI components and ingest seed runbooks on startup
+try:
+    init_ai_components()
+except Exception as e:
+    logger.warning(f"Eager initialization of AI components deferred: {e}")
 
 
 @app.route('/health', methods=['GET'])

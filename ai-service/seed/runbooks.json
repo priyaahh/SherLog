@@ -1,0 +1,38 @@
+[
+  {
+    "id": "rb_db_pool_exhausted",
+    "title": "Database Connection Pool Exhaustion (ERR_DB_POOL_EXHAUSTED)",
+    "content": "Diagnosis: Application logs exhibit 'ERR_DB_POOL_EXHAUSTED', 'Timeout: connection pool exhausted', or 'cannot acquire connection from pool'. Worker threads wait indefinitely or exceed connection timeout thresholds trying to obtain an active database session. Typical causes include connection leaks where database sessions are not returned to the pool within try/finally blocks, long-running unindexed queries holding connections, backend database max_connections limit reached, or sudden traffic surges. Immediate Remediation: 1. Scale database connection pool settings (e.g., increase max_connections, pool_size, and max_overflow). 2. Terminate idle-in-transaction and long-running queries via pg_terminate_backend() or KILL QUERY. 3. Introduce connection pooling middleware such as PgBouncer. 4. Audit application database checkout blocks for missing context managers or unclosed connections.",
+    "source": "seed_runbooks"
+  },
+  {
+    "id": "rb_oom_heap_exhaustion",
+    "title": "Out of Memory (OOM / OutOfMemoryError) and Pod Eviction",
+    "content": "Diagnosis: Services terminate unexpectedly with exit code 137 (OOMKilled) or log 'java.lang.OutOfMemoryError: Java heap space', 'Memory limit exceeded', or 'cgroup out of memory'. Caused by memory leaks in long-lived caches, loading unbounded result sets into memory without streaming or pagination, high concurrency under insufficient heap allocation, or misconfigured JVM max heap (-Xmx) exceeding container cgroup memory limits. Immediate Remediation: 1. Inspect container metrics and heap dumps to identify high memory consumers. 2. Temporarily raise container memory limits in deployment manifests and tune -Xmx to 75% of container RAM. 3. Restart failing worker replicas to restore immediate availability. 4. Enforce pagination and cursor streaming on bulk data operations.",
+    "source": "seed_runbooks"
+  },
+  {
+    "id": "rb_request_timeout",
+    "title": "Upstream Request Timeout and HTTP 504 Gateway Timeout",
+    "content": "Diagnosis: API gateway, ingress controllers, or client microservices log 'HTTP 504 Gateway Timeout', 'Request timeout after 30000ms', 'upstream request timeout', or 'deadline exceeded'. Downstream services back up, causing thread exhaustion and cascading latency spikes. Root causes include downstream microservice degradation, database query lock contention, network transit delays, or third-party API outages. Immediate Remediation: 1. Trace distributed requests via correlation ID or OpenTelemetry to pinpoint the slow upstream service. 2. Enable or tune circuit breakers (e.g. Envoy, Resilience4j) to fail fast and prevent cascade. 3. Verify downstream service health, CPU, and worker thread utilization. 4. Increase proxy read and connect timeouts (e.g., proxy_read_timeout) if operations are legitimately long-running, or offload to background task queues.",
+    "source": "seed_runbooks"
+  },
+  {
+    "id": "rb_connection_failure",
+    "title": "TCP Network Connection Failure (ECONNREFUSED / Connection Refused)",
+    "content": "Diagnosis: Client applications encounter 'connection refused', 'ECONNREFUSED', 'Network unreachable', or 'connection reset by peer'. Target host or port is rejecting TCP SYN packets. Root causes include target service being down, crashed, or restarting; process listening only on 127.0.0.1 instead of 0.0.0.0; firewall / AWS Security Group / Kubernetes NetworkPolicy blocking ingress; or DNS misconfiguration resolving to incorrect IP. Immediate Remediation: 1. Check if the target service is running and listening: kubectl get pods, netstat -tuln, or systemctl status. 2. Verify target process binds to 0.0.0.0 (all interfaces) rather than localhost. 3. Validate network connectivity and port accessibility using nc -zv <host> <port> or curl -v. 4. Check firewall rules, security groups, and DNS records (resolve via nslookup/dig).",
+    "source": "seed_runbooks"
+  },
+  {
+    "id": "rb_ssl_cert_expired",
+    "title": "SSL/TLS Certificate Expiration and Verification Failure",
+    "content": "Diagnosis: HTTPS requests fail with 'SSL: CERTIFICATE_VERIFY_FAILED', 'certificate has expired', 'x509: certificate signed by unknown authority', or 'SSL handshake failed'. Indicates public or internal TLS certificate validity period has ended, intermediate certificate chain is missing from server configuration, or automated renewal (e.g., cert-manager, Let's Encrypt) failed due to DNS challenge or rate limit errors. Immediate Remediation: 1. Verify certificate expiration date using: openssl s_client -connect <host>:443 -servername <host> | openssl x509 -noout -dates. 2. Force certificate renewal via cert-manager or renew ACME certs using certbot renew. 3. Ensure full certificate chain (including intermediate CAs) is provided in the web server / ingress bundle (fullchain.pem). 4. For private CA environments, verify the custom root CA certificate is installed in the container's trust store (/etc/ssl/certs).",
+    "source": "seed_runbooks"
+  },
+  {
+    "id": "rb_database_deadlock",
+    "title": "Database Deadlocks and Lock Wait Timeout Exceeded",
+    "content": "Diagnosis: Database transactions fail with 'deadlock detected', 'Lock wait timeout exceeded', or 'deadlock victim'. Occurs when two or more transactions acquire locks on multiple tables or rows in differing order, or when large batch updates conflict with high-throughput OLTP operations. Immediate Remediation: 1. Inspect database engine status (e.g., SHOW ENGINE INNODB STATUS or pg_stat_activity) to identify conflicting transactions. 2. Terminate blocking backend transaction if deadlocks persist. 3. Ensure applications access database tables and rows in a consistent, deterministic order. 4. Keep transactions short, execute non-database logic outside transaction boundaries, and implement automatic exponential retry with jitter.",
+    "source": "seed_runbooks"
+  }
+]
